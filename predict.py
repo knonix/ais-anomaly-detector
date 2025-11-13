@@ -1,111 +1,214 @@
 from cog import BasePredictor, Input
-import torch
-import torch.nn as nn
+from typing import Dict, List
 import json
-import numpy as np
-from sklearn.ensemble import IsolationForest  # Proxy for XGBoost; use import xgboost as xgb for full
-import pickle  # For loading .pkl
-from math import radians, sin, cos, sqrt, atan2
+import math
+from datetime import datetime, timedelta
+from collections import defaultdict
 
-class AISAutoencoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = nn.Sequential(nn.Linear(3, 16), nn.ReLU(), nn.Linear(16, 8))  # Features: lat, long, SOG
-        self.decoder = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 3))
-
-    def forward(self, x):
-        return self.decoder(self.encoder(x))
+# Technique metadata from PDF (ID: {name, impact snippet for logging})
+TECHNIQUES = {
+    1: {"name": "Going Dark", "impact": "Loss of MDA, increased enforcement difficulty, greater collision risk"},
+    2: {"name": "AIS Spoofing (Self-Spoof)", "impact": "Misattribution of movements, navigational hazards, reduced trust in AIS feeds"},
+    3: {"name": "AIS Hijacking (Impersonation)", "impact": "Attribution problems, legal complications, masking of illicit operations"},
+    4: {"name": "Location Tampering / GNSS Spoofing", "impact": "Navigation errors, collision risk, loss of trust in GNSS-dependent systems"},
+    5: {"name": "Replay / Relay (Message Re-injection)", "impact": "False situational pictures, wasted enforcement effort, contaminated archives"},
+    6: {"name": "Availability Disruption (Flooding / Jamming / DoS)", "impact": "Regional loss of MDA, increased maritime safety risk, concealment opportunities"},
+    7: {"name": "Zombie Vessels", "impact": "Hinders vetting, enforcement, and provenance checks; complicates legal accountability"},
+    8: {"name": "AIS Handshakes / Identity Swap", "impact": "Obscures enforcement trails, confuses historical logs, complicates seizure"},
+    9: {"name": "Hybrid & Coordinated Attacks", "impact": "High-severity strategic deception with amplified operational and geopolitical consequences"},
+    10: {"name": "Virtual AtoN (V-AtoN) Spoofing", "impact": "Safety hazards (groundings, collisions), disruption of routing, malicious entrapment"},
+    11: {"name": "Aggregator / Provider Injection", "impact": "Widespread misinformation, reputational damage, misdirected operational responses"},
+    12: {"name": "Antenna / Transmitter Cloning & Base-Station Emulation", "impact": "Misleading DF efforts, erroneous localization, greater difficulty proving origin"},
+    13: {"name": "Firmware / Supply-Chain Compromise", "impact": "Deep, hard-to-detect persistence that undermines device trust"},
+    14: {"name": "Satellite-AIS (S-AIS) Specific Attacks", "impact": "Massive dissemination of false data, eroding confidence in satellite-derived AIS"},
+    15: {"name": "Frequency-Based Tactics (Hopping / Multi-Channel Flooding)", "impact": "Wider blind areas, more complex attribution, difficulty maintaining coverage"},
+    16: {"name": "Radar / Sensor Corruption (Cross-Sensor Deception)", "impact": "Weakens sensor fusion, increases false positives/negatives, complicates resolution"},
+    17: {"name": "Social-Engineering / Operator-Level Deception", "impact": "Scales deception via trusted channels, undermines procedural controls"},
+    18: {"name": "Replay / Store-and-Forward Variants (Surgical Re-Injection)", "impact": "Tactical confusion, wasted responses, contamination of decision-making"},
+    19: {"name": "Coordinated Disinformation / Political Use", "impact": "Diplomatic tension, misinformed policy decisions, potential unintended escalation"},
+    20: {"name": "Distress & SAR Message Spoofing", "impact": "Dangerous diversion of rescue assets, potential ambush scenarios, erosion of trust"},
+    21: {"name": "Binary / Safety Message & Area-Notice Manipulation (Msg 8/12/14)", "impact": "Operational disruption, navigational hazards, potential economic/safety consequences"},
+    22: {"name": "Channel-Management Abuse (Msg 22 / DSC)", "impact": "Fragmented MDA, selective monitoring blind spots, opportunity for focused illicit activity"},
+    23: {"name": "Covert Messaging", "impact": "Enables clandestine coordination while preserving plausible deniability; degrades AIS confidence"}
+}
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load models on startup"""
-        self.ae_model = AISAutoencoder()
-        # self.ae_model.load_state_dict(torch.load('model.pth', map_location='cpu'))  # Uncomment if using
-        self.ae_model.eval()
-        
-        # Load XGBoost/IsolationForest for kinematics (train on deltas/speeds)
-        with open('xgboost_model.pkl', 'rb') as f:
-            self.kinematics_model = pickle.load(f)  # Assumes IsolationForest or XGBClassifier saved
+        self.last_seen = defaultdict(lambda: None)  # Track per-MMSI timestamps for statefulness
+        self.known_hashes = defaultdict(set)  # For replay detection
 
-    @torch.inference_mode()
-    def predict(self, ais_json: str = Input(description="JSON string of AIS data")) -> str:
-        """Score anomalies across techniques"""
-        input_data = json.loads(ais_json)
-        positions = np.array(input_data['positions'])  # [[lat, long, sog, ...]]; extend features as needed
-        mmsi = input_data.get('mmsi', None)
-        timestamps = input_data.get('timestamps', [])  # Optional for gaps/timing
+    def haversine_distance(self, lat1, lon1, lat2, lon2):
+        if not (lat1 and lon1 and lat2 and lon2):
+            return 0
+        R = 6371  # km
+        dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+        return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-        # 1. Autoencoder for general track reconstruction
-        if len(positions) > 0:
-            inputs = torch.tensor(positions[:, :3], dtype=torch.float32)  # Assume first 3 cols: lat/long/sog
-            outputs = self.ae_model(inputs)
-            mse = torch.mean((inputs - outputs) ** 2).item()
-            ae_score = min(1.0, mse / 0.1)  # Normalize 0-1
-        else:
-            ae_score = 0.0
+    def predict(self, ais_json: str = Input(description="Batched AIS JSON as string (list of dicts with MMSI, Latitude, Longitude, SpeedOverGround, Timestamp)")) -> Dict:
+        try:
+            data = json.loads(ais_json)
+            if not isinstance(data, list):
+                data = [data]
+        except json.JSONDecodeError:
+            return {"score": 0.0, "techniques": [], "impact": "Invalid JSON input"}
 
-        # 2. XGBoost for kinematics (e.g., jumps, speeds)
-        kinem_score = 0.0
-        if len(positions) > 1:
-            lats, lons, sogs = positions[:, 0], positions[:, 1], positions[:, 2]
-            # Haversine distance deltas for jumps (>10km = Technique 2 flag)
-            def haversine(lat1, lon1, lat2, lon2):
-                R = 6371  # km
-                dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
-                a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-                c = 2 * atan2(sqrt(a), sqrt(1 - a))
-                return R * c
-            dist_deltas = np.array([haversine(lats[i], lons[i], lats[i+1], lons[i+1]) for i in range(len(lats)-1)])
-            max_delta = np.max(dist_deltas)
-            speed_deltas = np.diff(sogs)  # Abrupt changes
-            
-            # Features for model: [mean_dist_delta, max_speed, std_sog]
-            features = np.array([[np.mean(dist_deltas), np.max(sogs), np.std(sogs)]])
-            
-            # Predict with loaded model (anomaly score; -1 outlier for IsolationForest)
-            kinem_pred = self.kinematics_model.predict(features)[0]
-            kinem_score = 1.0 if kinem_pred == -1 or max_delta > 10 else 0.0  # >0.8 threshold logic
+        flagged_techniques = set()
+        total_score = 0.0
+        mmsis = [msg.get('MMSI') for msg in data if msg.get('MMSI')]
 
-        overall_score = max(ae_score, kinem_score)
+        for msg in data:
+            mmsi = msg.get('MMSI')
+            if not mmsi:
+                continue
+            try:
+                ts_str = msg.get('Timestamp', datetime.now().isoformat())
+                timestamp = datetime.fromisoformat(ts_str.replace('Z', '+00:00')) if 'Z' in ts_str else datetime.fromisoformat(ts_str)
+            except:
+                timestamp = datetime.now()
 
-        # 3. Extend for all 23 techniques: Rule/ML checks (expand with PDF manifests)
-        techniques = []
-        if overall_score > 0.7:
-            techniques.extend([2, 4])  # Self-Spoof, GNSS Spoofing (jumps/drifts)
-        if kinem_score > 0.8:
-            techniques.append(1)  # Going Dark (add gap check on timestamps)
-        
-        # Modular checks dict (1-23; add ML/rules per PDF, e.g., hash for replays)
-        tech_checks = {
-            3: lambda d: 'mmsi' in d and len(str(d.get('mmsi', ''))) < 9,  # Dummy: Short MMSI (hijacking duplicate)
-            5: lambda d: len(set(tuple(map(tuple, np.array(d['positions'])))) < len(d['positions']),  # Replay: Duplicate positions
-            6: lambda d: np.std([p[2] for p in d['positions']]) > 50,  # Disruption: High SOG variance (flooding noise)
-            7: lambda d: 'mmsi' in d and str(d['mmsi']).startswith('000'),  # Zombie: Scrapped-like ID
-            8: lambda d: len(set([str(p) for p in d.get('static_fields', [])])) < len(d['static_fields']),  # Swap: Duplicate statics
-            9: lambda d: len(d['techniques']) > 2 if 'techniques' in d else False,  # Hybrid: Multiple flags (recursive)
-            10: lambda d: any('aton' in str(p) for p in d['positions']),  # V-AtoN: Dummy AtoN keywords
-            11: lambda d: np.mean(dist_deltas) < 0.1 if 'dist_deltas' in locals() else False,  # Aggregator: Static tracks
-            12: lambda d: np.var(sogs) < 0.01,  # Cloning: Low variance (mimic)
-            13: lambda d: len(timestamps) > 0 and np.mean(np.diff(timestamps)) == 0,  # Firmware: Uniform timing
-            14: lambda d: len(positions) % 2 == 0 and np.mean(lats) > 50,  # S-AIS: Even count, high lat (satellite pass)
-            15: lambda d: len(set(np.round(sogs, 1))) < 3,  # Frequency hopping: Few discrete speeds
-            16: lambda d: any(abs(sog) > 100 for sog in sogs),  # Sensor corruption: Extreme values
-            17: lambda d: 'manual_edit' in d,  # Social-eng: Flag in input
-            18: lambda d: any(np.allclose(positions[i], positions[i+1]) for i in range(len(positions)-1)),  # Surgical replay: Identical seq
-            19: lambda d: len(positions) > 20 and np.std(lats) < 1,  # Disinfo: Theater-wide static
-            20: lambda d: any(sog < 0 for sog in sogs),  # Distress: Negative speeds (improbable)
-            21: lambda d: 'binary_payload' in d and len(d['binary_payload']) < 10,  # Binary abuse: Short payloads
-            22: lambda d: np.mean(np.diff(timestamps)) > 3600 if timestamps else False,  # Channel abuse: Long intervals
-            23: lambda d: np.std(np.diff([p[2] for p in d['positions']])) < 0.01 if len(d['positions']) > 1 else False  # Covert: Non-natural low variation
-        }
-        for tid, check in tech_checks.items():
-            if check(input_data):
-                techniques.append(tid)
+            # Rule-based detections from PDF manifests
+            # 1: Going Dark (track disappears >30min)
+            if self.last_seen[mmsi]:
+                gap = timestamp - self.last_seen[mmsi]
+                if gap > timedelta(minutes=30):
+                    flagged_techniques.add(1)
+                    total_score += 0.8
+            self.last_seen[mmsi] = timestamp
 
-        impact = "High risk: Verify PDF impacts (e.g., MDA loss for Technique 1)" if techniques else "Normal operation"
+            # 2: AIS Spoofing (teleportation/impossible kinematics >10km jump)
+            if len(data) > 1:
+                for prev_msg in data[:-1]:
+                    if prev_msg.get('MMSI') == mmsi:
+                        dist = self.haversine_distance(msg.get('Latitude'), msg.get('Longitude'),
+                                                       prev_msg.get('Latitude'), prev_msg.get('Longitude'))
+                        if dist > 10:  # km
+                            flagged_techniques.add(2)
+                            total_score += 0.7
+                        break
 
-        return json.dumps({
-            "score": overall_score,
-            "techniques": sorted(set(techniques)),  # Unique IDs
+            # 3: Hijacking (same MMSI in distant locations/duplicates)
+            if mmsis.count(mmsi) > 1:
+                flagged_techniques.add(3)
+                total_score += 0.6
+
+            # 4: GNSS Spoofing (coordinated jumps/impossible speeds >50 knots)
+            sog = msg.get('SpeedOverGround', 0)
+            if sog > 50:
+                flagged_techniques.add(4)
+                total_score += 0.7
+
+            # 5: Replay (bit-identical payloads reappear)
+            msg_str = json.dumps(msg, sort_keys=True)
+            msg_hash = hash(msg_str)
+            if msg_hash in self.known_hashes[mmsi]:
+                flagged_techniques.add(5)
+                total_score += 0.9
+            self.known_hashes[mmsi].add(msg_hash)
+
+            # 6: Flooding (high message volume/malformed >50 in batch)
+            if len(data) > 50:
+                flagged_techniques.add(6)
+                total_score += 0.5
+
+            # 7: Zombie (MMSI of scrapped vessels; stub: invalid range <100 or >999999999)
+            if not (100 <= mmsi <= 999999999):
+                flagged_techniques.add(7)
+                total_score += 0.8
+
+            # 8: Identity Swap (near-simultaneous static changes; stub: rapid MMSI/ID changes in batch)
+            if any('Name' in msg and msg['Name'] != data[0].get('Name', '') for msg in data[1:]):
+                flagged_techniques.add(8)
+                total_score += 0.7
+
+            # 9: Coordinated (multiple vessels similar anomalies; stub: >3 vessels same lat/lon offset)
+            lats = [m.get('Latitude') for m in data]
+            if max(lats) - min(lats) < 0.01 and len(set(lats)) < len(data)/3:
+                flagged_techniques.add(9)
+                total_score += 0.9
+
+            # 10: V-AtoN (new AtoNs without physical; stub: detect AtoN message type if present)
+            if msg.get('MessageType') in [21, 123]:  # AIS AtoN types
+                flagged_techniques.add(10)
+                total_score += 0.6
+
+            # 11: Aggregator Injection (inconsistent with local; stub: flag if no 'source' or anomalous timestamp)
+            if 'source' not in msg and abs((timestamp - datetime.now()).days) > 1:
+                flagged_techniques.add(11)
+                total_score += 0.7
+
+            # 12: Cloning (RF anomalies; stub: duplicate full msg)
+            if data.count(msg) > 1:
+                flagged_techniques.add(12)
+                total_score += 0.8
+
+            # 13: Firmware Compromise (unexpected static edits; stub: varying name/MMSI in sequence)
+            names = [m.get('Name', '') for m in data if m.get('MMSI') == mmsi]
+            if len(set(names)) > 1:
+                flagged_techniques.add(13)
+                total_score += 0.75
+
+            # 14: S-AIS Attacks (ghosts during passes; stub: high volume in short time)
+            if len(data) > 20 and (timestamp - data[0]['Timestamp']) < timedelta(minutes=5):
+                flagged_techniques.add(14)
+                total_score += 0.8
+
+            # 15: Frequency Tactics (channel shifts; stub: varying 'Channel' if present)
+            channels = [m.get('Channel', 87) for m in data]
+            if len(set(channels)) > 1:
+                flagged_techniques.add(15)
+                total_score += 0.6
+
+            # 16: Sensor Corruption (mismatched kinematics; stub: speed=0 but position changes)
+            if sog == 0 and dist > 1:  # From earlier jump calc
+                flagged_techniques.add(16)
+                total_score += 0.7
+
+            # 17: Social-Engineering (manual edits; stub: unusual access patterns - flag if 'UserEdited' key)
+            if msg.get('UserEdited', False):
+                flagged_techniques.add(17)
+                total_score += 0.5
+
+            # 18: Surgical Replay (exact short sequences; stub: substring match in batch)
+            for prev in data[:-1]:
+                if json.dumps(prev)[:50] == json.dumps(msg)[:50]:
+                    flagged_techniques.add(18)
+                    total_score += 0.85
+
+            # 19: Disinformation (theater anomalies timed to events; stub: high flags in batch)
+            if len(flagged_techniques) > 5:
+                flagged_techniques.add(19)
+                total_score += 0.9
+
+            # 20: Distress Spoofing (improbable distress msgs; stub: if 'Distress' key without lat)
+            if msg.get('MessageType') == 14 and not msg.get('Latitude'):  # Safety msg
+                flagged_techniques.add(20)
+                total_score += 0.8
+
+            # 21: Binary Manipulation (unusual binary payloads; stub: if binary data present)
+            if 'BinaryData' in msg:
+                flagged_techniques.add(21)
+                total_score += 0.6
+
+            # 22: Channel Abuse (switch instructions; stub: Msg 22 type)
+            if msg.get('MessageType') == 22:
+                flagged_techniques.add(22)
+                total_score += 0.7
+
+            # 23: Covert Messaging (non-natural patterns; stub: structured timing variance <1s)
+            times = [datetime.fromisoformat(m.get('Timestamp', ts_str)) for m in data]
+            if times and all((times[i+1] - times[i]).total_seconds() < 1 for i in range(len(times)-1)):
+                flagged_techniques.add(23)
+                total_score += 0.75
+
+        # Aggregate
+        unique_techs = list(flagged_techniques)
+        score = min(total_score / max(len(data), 1), 1.0)  # Normalize
+        impacts = [TECHNIQUES[t]["impact"] for t in unique_techs]
+        impact = "; ".join(impacts) if impacts else "No anomalies detected"
+
+        return {
+            "score": float(score),
+            "techniques": unique_techs,
             "impact": impact
-        })
+        }

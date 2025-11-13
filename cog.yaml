@@ -1,9 +1,5 @@
 build:
-  gpu: true
-  cuda: "12.1"  # For PyTorch 2.4
   python_version: "3.12"
   python_packages:
-    - "torch==2.4.0"
-    - "numpy==1.26.0"
-    - "scikit-learn==1.5.0"  # For XGBoost if needed
+    - "numpy==1.26.4"  # For any vector ops
 predict: "predict.py:Predictor"

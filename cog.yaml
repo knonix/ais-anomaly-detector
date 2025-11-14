@@ -1,5 +1,5 @@
 build:
-  gpu: false  # Set true if needed; false avoids memory issues
+  gpu: false
   python_version: "3.12"
   python_packages:
     - "torch==2.4.0"

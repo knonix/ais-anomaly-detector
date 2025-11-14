@@ -10,7 +10,7 @@ import joblib  # For loading pre-trained model
 from datetime import datetime
 import hashlib
 
-# PDF Impacts (embedded for output)
+# PDF Impacts (embedded for outputs)
 PDF_IMPACTS = {
     1: "Loss of MDA, increased enforcement difficulty, greater collision risk in busy waters",
     2: "Misattribution of movements, navigational hazards if others rely on false data, reduced trust in AIS feeds",

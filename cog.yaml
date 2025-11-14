@@ -1,5 +1,12 @@
 build:
+  gpu: false  # Set true if needed; false avoids memory issues
   python_version: "3.12"
   python_packages:
-    - "numpy==1.26.4"  # For any vector ops
+    - "torch==2.4.0"
+    - "numpy==1.26.0"
+    - "pandas==2.2.2"
+    - "scikit-learn==1.5.0"
+    - "scipy==1.13.0"
+    - "joblib==1.4.2"
+    - "xgboost==2.1.1"
 predict: "predict.py:Predictor"

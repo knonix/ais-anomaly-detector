@@ -1,2 +1,6 @@
-torch==2.4.0
-numpy==1.26.0
+numpy>=1.24.3
+pandas>=2.0.3
+scikit-learn>=1.3.0
+scipy>=1.11.1
+cog>=0.8.5
+torch>=2.0.1  # Optional for future LSTM extensions

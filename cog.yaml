@@ -5,18 +5,7 @@ build:
   system_packages:
     - "libgl1-mesa-glx"  # For matplotlib if plotting
     - "libglib2.0-0"    # General deps
-  python_packages:
-    - "setuptools==70.3.0"  # Provides distutils shim for Python 3.13; install first
-    - "wheel==0.44.0"       # Helps with wheel builds
-    - "pip==25.3"           # Latest pip for better resolution
-    - "torch==2.9.1"        # Current stable (Nov 2025); supports 3.13
-    - "pandas==2.3.3"       # Upgraded for Python 3.13 wheels (latest Sep 2025)
-    - "numpy==2.1.0"        # Upgraded for Python 3.13 support (latest Aug 2024)
-    - "scikit-learn==1.7.2" # Upgraded to latest with Python 3.13 wheels (Sep 2025)
-    - "scipy==1.15.3"       # Upgraded to latest with Python 3.13 wheels (Oct 2025)
-    - "cog==0.8.5"          # Cog runtime
-  run:
-    - "pip install --upgrade pip setuptools wheel"  # Ensure upgrades in build env
+  python_requirements: "requirements.txt"  # Modern; points to slim file below
 
 predict: "predict.py:Predictor"
 

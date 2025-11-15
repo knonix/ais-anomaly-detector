@@ -6,28 +6,20 @@ build:
     - "libgl1-mesa-glx"  # For matplotlib if plotting
     - "libglib2.0-0"    # General deps
   python_packages:
-    - "pip==25.3"  # Upgrade pip first for compatibility
-    - "torch==2.9.1"  # Updated to current stable (Nov 2025); remove if unused
-    - "pandas==2.0.3"
-    - "numpy==1.24.3"
-    - "scikit-learn==1.3.0"
+    - "setuptools==70.3.0"  # Provides distutils shim for Python 3.13; install first
+    - "wheel==0.44.0"       # Helps with wheel builds
+    - "pip==25.3"           # Latest pip for better resolution
+    - "torch==2.9.1"        # Current stable (Nov 2025); supports 3.13
+    - "pandas==2.3.3"       # Upgraded for Python 3.13 wheels (latest Sep 2025)
+    - "numpy==2.1.0"        # Upgraded for Python 3.13 support (latest Aug 2024)
+    - "scikit-learn==1.3.0" # Keep for now; upgrade to 1.5.2 if needed
     - "scipy==1.11.1"
-    - "cog==0.8.5"  # Cog runtime
+    - "cog==0.8.5"          # Cog runtime
   run:
-    - "pip install -e ."
+    - "pip install --upgrade pip setuptools wheel"  # Ensure upgrades in build env
 
 predict: "predict.py:Predictor"
 
 # Optional: Environment variables, secrets, etc.
 # secrets:
 #   - imo_registry_api_key  # If adding real API
-
-# Example input/output schema (auto-inferred, but explicit for clarity)
-# inputs:
-#   - name: ais_json
-#     type: str
-#     description: AIS JSON batch
-# outputs:
-#   - name: anomaly_detection
-#     type: str
-#     description: JSON with score, techniques, impacts

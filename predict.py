@@ -211,8 +211,8 @@ class Predictor(BasePredictor):
                 sensor_score = 1.0 if 'radar_match' in gdf.columns and (gdf['radar_match'] == 0).any() else 0
                 if sensor_score > 0.5: flags.append(16); details['technique_16'] = sensor_score; explanations[16] = "Radar mismatches"
 
-                # 17) Social Eng: Manual edit proxy (sudden static change)
-                soc_score = 1.0 if gdf['static_tuple'].diff().any() else 0
+                # 17) Social Eng: Manual edit proxy (sudden static change) – FIXED: Use .ne(shift()) instead of .diff()
+                soc_score = 1.0 if gdf['static_tuple'].ne(gdf['static_tuple'].shift()).any() else 0
                 if soc_score > 0.5: flags.append(17); details['technique_17'] = soc_score; explanations[17] = "Unexplained static edits"
 
                 # 18) Surgical Replay: Short dupe sequences

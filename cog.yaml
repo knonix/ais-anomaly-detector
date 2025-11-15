@@ -6,7 +6,8 @@ build:
     - "libgl1-mesa-glx"  # For matplotlib if plotting
     - "libglib2.0-0"    # General deps
   python_packages:
-    - "torch==2.0.1"  # For potential LSTM (available in env)
+    - "pip==25.3"  # Upgrade pip first for compatibility
+    - "torch==2.9.1"  # Updated to current stable (Nov 2025); remove if unused
     - "pandas==2.0.3"
     - "numpy==1.24.3"
     - "scikit-learn==1.3.0"
